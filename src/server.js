@@ -252,8 +252,11 @@ app.post("/api/enquiries", async (request, response, next) => {
 });
 
 app.post("/api/faculty-applications", async (request, response, next) => {
-  if (!supabaseConfigured || !rateLimitConfigured || !cloudinaryConfigured || !isDatabaseConnected()) {
+  if (!supabaseConfigured || !rateLimitConfigured || !isDatabaseConnected()) {
     return response.status(503).json({ error: "Applications are temporarily unavailable. Please try again later." });
+  }
+  if (!cloudinaryConfigured) {
+    return response.status(503).json({ error: "Resume uploads are not configured yet. Please try again later." });
   }
   const origin = request.get("Origin");
   if (!origin || !effectiveAllowedOrigins.has(origin)) {
