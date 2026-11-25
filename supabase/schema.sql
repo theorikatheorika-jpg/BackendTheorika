@@ -294,6 +294,36 @@ CREATE TABLE IF NOT EXISTS "enquiry_rate_limits" (
 );
 CREATE INDEX IF NOT EXISTS "enquiry_rate_limits_expiry" ON "enquiry_rate_limits" ("expiresAt");
 
+CREATE TABLE IF NOT EXISTS "faculty_applications" (
+  "_id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  "fullName" varchar(120) NOT NULL,
+  "email" varchar(254) NOT NULL,
+  "phone" varchar(20) NOT NULL,
+  "city" varchar(100) NOT NULL,
+  "qualification" varchar(160) NOT NULL,
+  "experienceYears" integer NOT NULL CHECK ("experienceYears" BETWEEN 0 AND 60),
+  "subjects" jsonb NOT NULL CHECK (jsonb_typeof("subjects") = 'array'),
+  "classes" jsonb NOT NULL CHECK (jsonb_typeof("classes") = 'array'),
+  "message" varchar(1500) NOT NULL DEFAULT '',
+  "resumeFilename" varchar(200) NOT NULL,
+  "resumeContentType" text NOT NULL CHECK ("resumeContentType" IN ('application/pdf', 'application/msword', 'application/vnd.ms-word', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.oasis.opendocument.text', 'application/rtf', 'text/rtf', 'text/plain')),
+  "resumeUrl" text NOT NULL,
+  "resumePublicId" text NOT NULL,
+  "resumeResourceType" text NOT NULL DEFAULT 'raw',
+  "resumeData" bytea CHECK ("resumeData" IS NULL OR octet_length("resumeData") <= 5242880),
+  "consentAt" timestamptz NOT NULL,
+  "status" text NOT NULL DEFAULT 'Received' CHECK ("status" IN ('Received', 'Reviewing', 'Shortlisted', 'Rejected', 'Hired')),
+  "createdAt" timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE "faculty_applications" ADD COLUMN IF NOT EXISTS "resumeUrl" text;
+ALTER TABLE "faculty_applications" ADD COLUMN IF NOT EXISTS "resumePublicId" text;
+ALTER TABLE "faculty_applications" ADD COLUMN IF NOT EXISTS "resumeResourceType" text NOT NULL DEFAULT 'raw';
+ALTER TABLE "faculty_applications" ALTER COLUMN "resumeData" DROP NOT NULL;
+ALTER TABLE "faculty_applications" DROP CONSTRAINT IF EXISTS "faculty_applications_resumeContentType_check";
+ALTER TABLE "faculty_applications" ADD CONSTRAINT "faculty_applications_resumeContentType_check"
+  CHECK ("resumeContentType" IN ('application/pdf', 'application/msword', 'application/vnd.ms-word', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.oasis.opendocument.text', 'application/rtf', 'text/rtf', 'text/plain'));
+CREATE INDEX IF NOT EXISTS "faculty_applications_created" ON "faculty_applications" ("createdAt" DESC);
+
 ALTER TABLE "counters" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "users" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "class_options" ENABLE ROW LEVEL SECURITY;
@@ -314,3 +344,4 @@ ALTER TABLE "fee_records" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "notices" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "activity_logs" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "enquiry_rate_limits" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "faculty_applications" ENABLE ROW LEVEL SECURITY;

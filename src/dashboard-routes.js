@@ -1,5 +1,6 @@
 const crypto = require("node:crypto");
 const bcrypt = require("bcryptjs");
+const cloudinary = require("cloudinary").v2;
 const express = require("express");
 const nodemailer = require("nodemailer");
 const { z } = require("zod");
@@ -16,7 +17,7 @@ const {
   User,
   UserSession,
 } = require("./models");
-const { isDatabaseConnected, isDatabaseConfigured } = require("./database");
+const { isDatabaseConnected, isDatabaseConfigured, query } = require("./database");
 const {
   clearSessionCookie,
   createSession,
@@ -670,6 +671,75 @@ router.get("/api/admin/enquiries", requireAuth({ roles: ["admin", "superadmin"] 
     const enquiries = await Enquiry.find(status.data ? { status: status.data } : {})
       .sort({ createdAt: -1 }).limit(100).lean();
     return response.json({ enquiries });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.get("/api/admin/faculty-applications", requireAuth({ roles: ["admin", "superadmin"] }), async (_request, response, next) => {
+  try {
+    const result = await query(
+      `SELECT "_id", "fullName", "email", "phone", "city", "qualification", "experienceYears", "subjects", "classes", "message", "resumeFilename", "status", "createdAt" FROM "faculty_applications" ORDER BY "createdAt" DESC LIMIT 100`,
+    );
+    return response.json({ applications: result.rows });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.get("/api/admin/faculty-applications/:applicationId/resume", requireAuth({ roles: ["admin", "superadmin"] }), async (request, response, next) => {
+  try {
+    const applicationId = z.string().uuid().safeParse(request.params.applicationId);
+    if (!applicationId.success) return response.status(400).json({ error: "Invalid application." });
+    const result = await query(
+      `SELECT "resumeFilename", "resumeContentType", "resumeData", "resumePublicId", "resumeResourceType" FROM "faculty_applications" WHERE "_id" = $1`,
+      [applicationId.data],
+    );
+    const application = result.rows[0];
+    if (!application) return response.status(404).json({ error: "Application not found." });
+    const filename = application.resumeFilename.replace(/[^A-Za-z0-9._-]/g, "_");
+    response.set({
+      "Cache-Control": "private, no-store",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      "Content-Type": application.resumeContentType,
+      "X-Content-Type-Options": "nosniff",
+    });
+    if (application.resumeData) return response.send(application.resumeData);
+    if (!application.resumePublicId || !process.env.CLOUDINARY_URL) {
+      return response.status(503).json({ error: "The resume storage service is unavailable." });
+    }
+    const temporaryUrl = cloudinary.utils.private_download_url(application.resumePublicId, null, {
+      resource_type: application.resumeResourceType || "raw",
+      type: "authenticated",
+      expires_at: Math.floor(Date.now() / 1000) + 300,
+      attachment: true,
+    });
+    const fileResponse = await fetch(temporaryUrl);
+    if (!fileResponse.ok) {
+      console.error("Could not retrieve a faculty resume from Cloudinary.", { status: fileResponse.status });
+      return response.status(502).json({ error: "The resume could not be retrieved. Please try again later." });
+    }
+    return response.send(Buffer.from(await fileResponse.arrayBuffer()));
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.patch("/api/admin/faculty-applications/:applicationId", requireAuth({ roles: ["admin", "superadmin"] }), async (request, response, next) => {
+  try {
+    const applicationId = z.string().uuid().safeParse(request.params.applicationId);
+    const parsed = z.object({
+      status: z.enum(["Received", "Reviewing", "Shortlisted", "Rejected", "Hired"]),
+    }).strict().safeParse(request.body);
+    if (!applicationId.success) return response.status(400).json({ error: "Invalid application." });
+    if (!parsed.success) return validationError(response, parsed.error);
+    const result = await query(
+      `UPDATE "faculty_applications" SET "status" = $1 WHERE "_id" = $2 RETURNING "_id"`,
+      [parsed.data.status, applicationId.data],
+    );
+    if (!result.rows[0]) return response.status(404).json({ error: "Application not found." });
+    await writeAudit(request.auth.user._id, "faculty_application.status_changed", "FacultyApplication", applicationId.data, parsed.data);
+    return response.json({ success: true });
   } catch (error) {
     return next(error);
   }
