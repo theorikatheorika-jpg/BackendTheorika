@@ -230,6 +230,11 @@ start().catch((error) => {
   const safeMessage = typeof error?.message === "string"
     ? error.message.replace(/postgres(?:ql)?:\/\/\S+/gi, "[redacted Supabase database URL]")
     : "Unknown connection error.";
+  if (error?.code === "ENETUNREACH") {
+    console.error(
+      "The database host is unreachable from this network. On Render, set SUPABASE_DB_URL to the Supabase Session pooler connection string (port 5432), not the direct database connection string.",
+    );
+  }
   console.error("Could not connect to Supabase:", {
     name: error?.name || "Unknown error",
     code: error?.codeName || error?.code || "unavailable",
