@@ -311,13 +311,42 @@ app.use((error, _request, response, _next) => {
   if (error?.code === "UNSUPPORTED_RESUME_TYPE") {
     return response.status(400).json({ error: error.message });
   }
+  if (error?.facultyApplicationStage === "cloudinary") {
+    const cloudinaryError = error.cause;
+    console.error("Faculty resume upload failed.", {
+      code: cloudinaryError?.http_code || cloudinaryError?.code || "unavailable",
+      name: cloudinaryError?.name || "CloudinaryError",
+    });
+    if ([401, 403].includes(cloudinaryError?.http_code)) {
+      return response.status(503).json({ error: "Resume storage is not authorized. Check the Cloudinary credentials configured on the backend." });
+    }
+    return response.status(502).json({ error: "Resume storage could not accept this file. Please try again later." });
+  }
+  if (error?.facultyApplicationStage === "database") {
+    const databaseError = error.cause;
+    console.error("Faculty application database write failed.", {
+      code: databaseError?.code || "unavailable",
+      table: databaseError?.table || "unavailable",
+      column: databaseError?.column || "unavailable",
+      constraint: databaseError?.constraint || "unavailable",
+    });
+    if (["42P01", "42703", "23502", "23514"].includes(databaseError?.code)) {
+      return response.status(503).json({ error: "Faculty application storage needs a database schema update. Please contact the site administrator." });
+    }
+    return response.status(503).json({ error: "Your resume was uploaded, but the application could not be saved. Please try again later." });
+  }
   if (error instanceof SyntaxError && "body" in error) {
     return response.status(400).json({ error: "Please submit valid JSON." });
   }
   if (error?.type === "entity.too.large") {
     return response.status(413).json({ error: "The request is too large." });
   }
-  console.error("Unhandled API error:", error?.name || "Unknown error.");
+  console.error("Unhandled API error:", {
+    name: error?.name || "Unknown error.",
+    code: error?.code || "unavailable",
+    table: error?.table || "unavailable",
+    column: error?.column || "unavailable",
+  });
   return response.status(500).json({ error: "An unexpected server error occurred." });
 });
 
@@ -347,26 +376,41 @@ async function submitFacultyApplication(request, response, next) {
     const publicId = `theorika/faculty-applications/${crypto.randomUUID()}${extension}`;
     let uploadedAsset;
     try {
-      uploadedAsset = await uploadFacultyResume(resume.buffer, publicId);
-      const result = await query(
-        `INSERT INTO "faculty_applications" ("fullName", "email", "phone", "city", "qualification", "experienceYears", "subjects", "classes", "message", "resumeFilename", "resumeContentType", "resumeUrl", "resumePublicId", "resumeResourceType", "consentAt") VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12, $13, $14, now()) RETURNING "_id"`,
-        [
-          application.fullName,
-          application.email,
-          application.phone,
-          application.city,
-          application.qualification,
-          application.experienceYears,
-          JSON.stringify(application.subjects),
-          JSON.stringify(application.classes),
-          application.message,
-          resumeName,
-          resume.mimetype,
-          uploadedAsset.secure_url,
-          uploadedAsset.public_id,
-          uploadedAsset.resource_type,
-        ],
-      );
+      try {
+        uploadedAsset = await uploadFacultyResume(resume.buffer, publicId);
+      } catch (cause) {
+        throw Object.assign(new Error("Cloudinary resume upload failed."), {
+          cause,
+          facultyApplicationStage: "cloudinary",
+        });
+      }
+      let result;
+      try {
+        result = await query(
+          `INSERT INTO "faculty_applications" ("fullName", "email", "phone", "city", "qualification", "experienceYears", "subjects", "classes", "message", "resumeFilename", "resumeContentType", "resumeUrl", "resumePublicId", "resumeResourceType", "consentAt") VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12, $13, $14, now()) RETURNING "_id"`,
+          [
+            application.fullName,
+            application.email,
+            application.phone,
+            application.city,
+            application.qualification,
+            application.experienceYears,
+            JSON.stringify(application.subjects),
+            JSON.stringify(application.classes),
+            application.message,
+            resumeName,
+            resume.mimetype,
+            uploadedAsset.secure_url,
+            uploadedAsset.public_id,
+            uploadedAsset.resource_type,
+          ],
+        );
+      } catch (cause) {
+        throw Object.assign(new Error("Faculty application database write failed."), {
+          cause,
+          facultyApplicationStage: "database",
+        });
+      }
       return response.status(201).json({ success: true, applicationId: result.rows[0]._id });
     } catch (error) {
       if (uploadedAsset) {
