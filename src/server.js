@@ -266,38 +266,10 @@ app.post("/api/faculty-applications", async (request, response, next) => {
   if (!ipAddress) {
     return response.status(400).json({ error: "Unable to verify this request. Please try again later." });
   }
-
-  try {
-    const keyHash = crypto.createHmac("sha256", process.env.RATE_LIMIT_HASH_SECRET)
-      .update(`faculty-application:${ipAddress}`)
-      .digest("hex");
-    const currentWindow = new Date(Math.floor(Date.now() / 3_600_000) * 3_600_000);
-    const rateLimit = await EnquiryRateLimit.findOneAndUpdate(
-      { keyHash, windowStartedAt: currentWindow },
-      {
-        $inc: { requestCount: 1 },
-        $setOnInsert: { expiresAt: new Date(currentWindow.getTime() + 48 * 3_600_000) },
-      },
-      { upsert: true, new: true },
-    ).catch(async (error) => {
-      if (error?.code !== 11000) throw error;
-      return EnquiryRateLimit.findOneAndUpdate(
-        { keyHash, windowStartedAt: currentWindow },
-        { $inc: { requestCount: 1 } },
-        { new: true },
-      );
-    });
-    if (!rateLimit) return response.status(503).json({ error: "Applications are temporarily unavailable." });
-    if (rateLimit.requestCount > 5) {
-      return response.status(429).json({ error: "Too many applications from this connection. Please try again later." });
-    }
-    return facultyApplicationUpload.single("resume")(request, response, (uploadError) => {
-      if (uploadError) return next(uploadError);
-      return submitFacultyApplication(request, response, next);
-    });
-  } catch (error) {
-    return next(error);
-  }
+  return facultyApplicationUpload.single("resume")(request, response, (uploadError) => {
+    if (uploadError) return next(uploadError);
+    return submitFacultyApplication(request, response, next);
+  });
 });
 
 app.use((error, _request, response, _next) => {
@@ -366,6 +338,33 @@ async function submitFacultyApplication(request, response, next) {
     if (!resume) return response.status(400).json({ error: "Please attach your resume as a supported document." });
     if (!isValidResumeFile(resume)) {
       return response.status(400).json({ error: "The selected file is not a valid document in its declared format." });
+    }
+    if (!request.ip) {
+      return response.status(400).json({ error: "Unable to verify this request. Please try again later." });
+    }
+
+    const keyHash = crypto.createHmac("sha256", process.env.RATE_LIMIT_HASH_SECRET)
+      .update(`faculty-application:${request.ip}`)
+      .digest("hex");
+    const currentWindow = new Date(Math.floor(Date.now() / 3_600_000) * 3_600_000);
+    const rateLimit = await EnquiryRateLimit.findOneAndUpdate(
+      { keyHash, windowStartedAt: currentWindow },
+      {
+        $inc: { requestCount: 1 },
+        $setOnInsert: { expiresAt: new Date(currentWindow.getTime() + 48 * 3_600_000) },
+      },
+      { upsert: true, new: true },
+    ).catch(async (error) => {
+      if (error?.code !== 11000) throw error;
+      return EnquiryRateLimit.findOneAndUpdate(
+        { keyHash, windowStartedAt: currentWindow },
+        { $inc: { requestCount: 1 } },
+        { new: true },
+      );
+    });
+    if (!rateLimit) return response.status(503).json({ error: "Applications are temporarily unavailable." });
+    if (rateLimit.requestCount > 10) {
+      return response.status(429).json({ error: "Too many applications from this connection. Please try again later." });
     }
 
     const application = parsed.data;
