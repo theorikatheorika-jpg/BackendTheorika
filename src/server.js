@@ -466,6 +466,7 @@ function uploadFacultyResume(buffer, publicId) {
 async function start() {
   if (supabaseConfigured) {
     await connectDatabase();
+    await ensureFacultyApplicationsSchema();
     console.log("Supabase database connected.");
   }
 
@@ -490,6 +491,58 @@ start().catch((error) => {
   });
   process.exit(1);
 });
+
+async function ensureFacultyApplicationsSchema() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS "faculty_applications" (
+      "_id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      "fullName" varchar(120) NOT NULL,
+      "email" varchar(254) NOT NULL,
+      "phone" varchar(20) NOT NULL,
+      "city" varchar(100) NOT NULL,
+      "qualification" varchar(160) NOT NULL,
+      "experienceYears" integer NOT NULL CHECK ("experienceYears" BETWEEN 0 AND 60),
+      "subjects" jsonb NOT NULL CHECK (jsonb_typeof("subjects") = 'array'),
+      "classes" jsonb NOT NULL CHECK (jsonb_typeof("classes") = 'array'),
+      "message" varchar(1500) NOT NULL DEFAULT '',
+      "resumeFilename" varchar(200) NOT NULL,
+      "resumeContentType" text NOT NULL CHECK ("resumeContentType" IN ('application/pdf', 'application/msword', 'application/vnd.ms-word', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.oasis.opendocument.text', 'application/rtf', 'text/rtf', 'text/plain')),
+      "resumeUrl" text NOT NULL,
+      "resumePublicId" text NOT NULL,
+      "resumeResourceType" text NOT NULL DEFAULT 'raw',
+      "resumeData" bytea,
+      "consentAt" timestamptz NOT NULL,
+      "status" text NOT NULL DEFAULT 'Received' CHECK ("status" IN ('Received', 'Reviewing', 'Shortlisted', 'Rejected', 'Hired')),
+      "createdAt" timestamptz NOT NULL DEFAULT now()
+    )
+  `);
+  await query(`ALTER TABLE "faculty_applications" ADD COLUMN IF NOT EXISTS "resumeUrl" text`);
+  await query(`ALTER TABLE "faculty_applications" ADD COLUMN IF NOT EXISTS "resumePublicId" text`);
+  await query(`ALTER TABLE "faculty_applications" ADD COLUMN IF NOT EXISTS "resumeResourceType" text NOT NULL DEFAULT 'raw'`);
+  await query(`ALTER TABLE "faculty_applications" ADD COLUMN IF NOT EXISTS "resumeData" bytea`);
+  await query(`ALTER TABLE "faculty_applications" ALTER COLUMN "resumeData" DROP NOT NULL`);
+  await query(`
+    DO $migration$
+    DECLARE constraint_record record;
+    BEGIN
+      FOR constraint_record IN
+        SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = '"faculty_applications"'::regclass
+          AND contype = 'c'
+          AND pg_get_constraintdef(oid) LIKE '%resumeContentType%'
+      LOOP
+        EXECUTE format('ALTER TABLE "faculty_applications" DROP CONSTRAINT %I', constraint_record.conname);
+      END LOOP;
+      ALTER TABLE "faculty_applications"
+        ADD CONSTRAINT "faculty_applications_resume_content_type_check"
+        CHECK ("resumeContentType" IN ('application/pdf', 'application/msword', 'application/vnd.ms-word', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.oasis.opendocument.text', 'application/rtf', 'text/rtf', 'text/plain'));
+    END;
+    $migration$
+  `);
+  await query(`ALTER TABLE "faculty_applications" ENABLE ROW LEVEL SECURITY`);
+  await query(`CREATE INDEX IF NOT EXISTS "faculty_applications_created" ON "faculty_applications" ("createdAt" DESC)`);
+}
 
 function parseTrustProxyHops() {
   const value = process.env.TRUST_PROXY_HOPS || "0";
