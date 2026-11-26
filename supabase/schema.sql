@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS "users" (
   "email" varchar(254) NOT NULL UNIQUE,
   "phone" varchar(20) NOT NULL,
   "passwordHash" text NOT NULL,
-  "role" text NOT NULL DEFAULT 'user' CHECK ("role" IN ('superadmin', 'admin', 'user')),
+  "role" text NOT NULL DEFAULT 'user' CHECK ("role" IN ('superadmin', 'admin', 'editor', 'user')),
   "status" text NOT NULL DEFAULT 'pending' CHECK ("status" IN ('pending', 'active', 'rejected', 'suspended', 'blocked', 'deleted')),
   "permissions" jsonb NOT NULL DEFAULT '{}'::jsonb,
   "preset" text NOT NULL DEFAULT 'custom' CHECK ("preset" IN ('learner', 'instructor', 'custom')),
@@ -323,6 +323,23 @@ ALTER TABLE "faculty_applications" DROP CONSTRAINT IF EXISTS "faculty_applicatio
 ALTER TABLE "faculty_applications" ADD CONSTRAINT "faculty_applications_resumeContentType_check"
   CHECK ("resumeContentType" IN ('application/pdf', 'application/msword', 'application/vnd.ms-word', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.oasis.opendocument.text', 'application/rtf', 'text/rtf', 'text/plain'));
 CREATE INDEX IF NOT EXISTS "faculty_applications_created" ON "faculty_applications" ("createdAt" DESC);
+
+CREATE TABLE IF NOT EXISTS "site_content" (
+  "_id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  "collection" varchar(60) NOT NULL,
+  "slug" varchar(160) NOT NULL,
+  "title" varchar(200) NOT NULL,
+  "content" jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof("content") = 'object'),
+  "displayOrder" integer NOT NULL DEFAULT 0 CHECK ("displayOrder" BETWEEN 0 AND 10000),
+  "isVisible" boolean NOT NULL DEFAULT true,
+  "status" text NOT NULL DEFAULT 'Draft' CHECK ("status" IN ('Draft', 'Published')),
+  "createdBy" uuid REFERENCES "users"("_id") ON DELETE SET NULL,
+  "createdAt" timestamptz NOT NULL DEFAULT now(),
+  "updatedAt" timestamptz NOT NULL DEFAULT now(),
+  UNIQUE ("collection", "slug")
+);
+CREATE INDEX IF NOT EXISTS "site_content_public_order" ON "site_content" ("collection", "status", "isVisible", "displayOrder");
+ALTER TABLE "site_content" ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE "counters" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "users" ENABLE ROW LEVEL SECURITY;

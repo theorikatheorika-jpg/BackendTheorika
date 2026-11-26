@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "seed": "node src/seed.js",
+    "seed:cms": "node src/seed-cms.js",
     "bootstrap:superadmin": "node src/bootstrap-superadmin.js"
   },
   "engines": {

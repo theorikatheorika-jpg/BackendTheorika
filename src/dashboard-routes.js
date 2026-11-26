@@ -11,6 +11,7 @@ const {
   Course,
   Enquiry,
   FeeRecord,
+  FollowUpRecord,
   Material,
   Notice,
   PortalEnrollment,
@@ -68,6 +69,11 @@ const safeUrlSchema = z.string().trim().url().max(1000).refine((value) => {
 
 const mailTransport = createMailTransport();
 const dummyPasswordHash = bcrypt.hashSync("not-a-real-password", 12);
+
+router.use("/api/public", (_request, response, next) => {
+  response.set("Cache-Control", "public, max-age=30, stale-while-revalidate=120");
+  return next();
+});
 
 router.use((request, response, next) => {
   if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method) && !allowedOrigins.has(request.get("Origin"))) {
@@ -274,6 +280,58 @@ router.post("/api/auth/resend-verification", async (request, response, next) => 
   }
 });
 
+router.post("/api/auth/forgot-password", async (request, response, next) => {
+  try {
+    if (!hasDatabaseAndAuth()) return configurationUnavailable(response);
+    if (!mailTransport) return response.status(503).json({ error: "Password recovery email is not configured. Contact the academy administrator." });
+    const parsed = z.object({ email: emailSchema }).strict().safeParse(request.body);
+    if (!parsed.success) return response.status(400).json({ error: "Enter a valid email address." });
+    const user = await User.findOne({ email: parsed.data.email, status: "active", deletedAt: { $exists: false } });
+    if (user) {
+      const token = crypto.randomBytes(32).toString("base64url");
+      const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
+      await User.updateOne({ _id: user._id }, {
+        $set: { passwordResetTokenHash: hashToken(token), passwordResetExpiresAt: expiresAt },
+      });
+      const resetUrl = new URL("/reset-password", getFrontendOrigin(request));
+      resetUrl.searchParams.set("token", token);
+      await mailTransport.sendMail({
+        from: process.env.EMAIL_FROM,
+        to: user.email,
+        subject: "Reset your Theorika account password",
+        text: `Use this link within 30 minutes to reset your password: ${resetUrl.toString()}`,
+      });
+    }
+    return response.json({ success: true, message: "If an active account uses that email, a password reset link has been sent." });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.post("/api/auth/reset-password", async (request, response, next) => {
+  try {
+    if (!hasDatabaseAndAuth()) return configurationUnavailable(response);
+    const parsed = z.object({ token: z.string().min(20).max(200), password: z.string().min(12).max(72) }).strict().safeParse(request.body);
+    if (!parsed.success) return response.status(400).json({ error: "Use a valid reset link and a password of at least 12 characters." });
+    const user = await User.findOne({
+      passwordResetTokenHash: hashToken(parsed.data.token),
+      passwordResetExpiresAt: { $gt: new Date() },
+      status: "active",
+      deletedAt: { $exists: false },
+    });
+    if (!user) return response.status(400).json({ error: "This password reset link is invalid or expired." });
+    await User.updateOne({ _id: user._id }, {
+      $set: { passwordHash: await bcrypt.hash(parsed.data.password, 12) },
+      $unset: { passwordResetTokenHash: 1, passwordResetExpiresAt: 1 },
+    });
+    await UserSession.updateMany({ user: user._id, revokedAt: { $exists: false } }, { $set: { revokedAt: new Date() } });
+    await writeAudit(user._id, "auth.password_reset", "User", user._id, {});
+    return response.json({ success: true, message: "Password updated. Sign in with your new password." });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 router.post("/api/auth/login", async (request, response, next) => {
   try {
     if (!hasDatabaseAndAuth()) return configurationUnavailable(response);
@@ -326,13 +384,24 @@ router.post("/api/auth/logout", requireAuth(), async (request, response, next) =
   }
 });
 
+router.post("/api/auth/logout-all", requireAuth(), async (request, response, next) => {
+  try {
+    await UserSession.updateMany({ user: request.auth.user._id, revokedAt: { $exists: false } }, { $set: { revokedAt: new Date() } });
+    clearSessionCookie(response);
+    await writeAudit(request.auth.user._id, "auth.logout_all", "User", request.auth.user._id, {});
+    return response.json({ success: true });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 router.get("/api/auth/me", requireAuth(), (request, response) => {
   return response.json({ user: publicUser(request.auth.user) });
 });
 
 router.get("/api/admin/dashboard", requireAuth({ roles: ["admin", "superadmin"] }), async (request, response, next) => {
   try {
-    const [activeUsers, pendingApprovals, runningBatches, newEnquiries, feesDue, recentEnquiries, recentActivity] = await Promise.all([
+    const [activeUsers, pendingApprovals, runningBatches, newEnquiries, feesDue, recentEnquiries, recentActivity, leadStats, studentsPerClass, popularSubject, enquiryTrend] = await Promise.all([
       User.countDocuments({ role: "user", status: "active" }),
       User.countDocuments({ role: "user", status: "pending" }),
       Batch.countDocuments({ status: { $in: ["Ongoing", "Started"] }, archivedAt: { $exists: false } }),
@@ -342,6 +411,10 @@ router.get("/api/admin/dashboard", requireAuth({ roles: ["admin", "superadmin"] 
         : Promise.resolve([]),
       Enquiry.find().select("leadId studentName className subjectName status createdAt").sort({ createdAt: -1 }).limit(8).lean(),
       ActivityLog.find().sort({ createdAt: -1 }).limit(8).populate("actor", "fullName email").lean(),
+      query(`SELECT count(*)::integer AS total, count(*) FILTER (WHERE "createdAt" >= date_trunc('day', now()))::integer AS today, count(*) FILTER (WHERE "createdAt" >= now() - interval '7 days')::integer AS this_week FROM "enquiries"`),
+      query(`SELECT "className", count(*)::integer AS total FROM "students" WHERE "archivedAt" IS NULL GROUP BY "className" ORDER BY "className"`),
+      query(`SELECT "subjectName", count(*)::integer AS total FROM "enquiries" WHERE "subjectName" IS NOT NULL AND "subjectName" <> '' GROUP BY "subjectName" ORDER BY total DESC LIMIT 1`),
+      query(`SELECT date_trunc('day', "createdAt")::date AS day, count(*)::integer AS total FROM "enquiries" WHERE "createdAt" >= current_date - interval '13 days' GROUP BY day ORDER BY day`),
     ]);
     return response.json({
       counts: {
@@ -349,12 +422,18 @@ router.get("/api/admin/dashboard", requireAuth({ roles: ["admin", "superadmin"] 
         pendingApprovals,
         runningBatches,
         newEnquiries,
+        totalEnquiries: leadStats.rows[0].total,
+        enquiriesToday: leadStats.rows[0].today,
+        enquiriesThisWeek: leadStats.rows[0].this_week,
         ...(request.auth.user.role === "superadmin" ? {
           feesDuePaise: feesDue.reduce((total, fee) => total + fee.amountPaise - fee.amountPaidPaise, 0),
         } : {}),
       },
       recentEnquiries,
       recentActivity,
+      studentsPerClass: studentsPerClass.rows,
+      popularSubject: popularSubject.rows[0] || null,
+      enquiryTrend: enquiryTrend.rows,
     });
   } catch (error) {
     return next(error);
@@ -381,7 +460,7 @@ router.get("/api/admin/users", requireAuth({ roles: ["admin", "superadmin"] }), 
     const search = z.string().trim().max(100).optional().safeParse(request.query.search);
     if (!status.success || !search.success) return response.status(400).json({ error: "Invalid user filters." });
     const filter = {
-      role: request.auth.user.role === "superadmin" ? { $in: ["admin", "user"] } : "user",
+      role: request.auth.user.role === "superadmin" ? { $in: ["admin", "editor", "user"] } : "user",
       ...(status.data ? { status: status.data } : {}),
       ...(search.data ? { $or: [
         { fullName: { $regex: escapeRegex(search.data), $options: "i" } },
@@ -406,7 +485,7 @@ router.patch("/api/admin/users/:userId/access", requireAuth({ roles: ["admin", "
     if (!parsed.success) return validationError(response, parsed.error);
     const target = await User.findById(request.params.userId);
     if (!target || target.role === "superadmin") return response.status(404).json({ error: "User not found." });
-    if (target.role === "admin" && request.auth.user.role !== "superadmin") {
+    if (["admin", "editor"].includes(target.role) && request.auth.user.role !== "superadmin") {
       return response.status(403).json({ error: "Only a Super Admin can change administrator accounts." });
     }
     const before = { status: target.status, preset: target.preset, permissions: target.permissions.toObject?.() || target.permissions };
@@ -666,11 +745,97 @@ router.patch("/api/admin/notices/:noticeId", requireAuth({ roles: ["admin", "sup
 
 router.get("/api/admin/enquiries", requireAuth({ roles: ["admin", "superadmin"] }), async (request, response, next) => {
   try {
-    const status = z.string().trim().max(80).optional().safeParse(request.query.status);
-    if (!status.success) return response.status(400).json({ error: "Invalid enquiry filter." });
-    const enquiries = await Enquiry.find(status.data ? { status: status.data } : {})
-      .sort({ createdAt: -1 }).limit(100).lean();
-    return response.json({ enquiries });
+    const parsed = z.object({
+      status: z.string().trim().max(80).optional(),
+      className: z.string().trim().max(80).optional(),
+      subjectName: z.string().trim().max(80).optional(),
+      search: z.string().trim().max(120).optional(),
+      page: z.coerce.number().int().min(1).max(10000).default(1),
+      limit: z.coerce.number().int().min(1).max(100).default(50),
+    }).safeParse(request.query);
+    if (!parsed.success) return response.status(400).json({ error: "Invalid enquiry filter." });
+    const { status, className, subjectName, search, page, limit } = parsed.data;
+    const filters = [];
+    const values = [];
+    for (const [column, value] of [["status", status], ["className", className], ["subjectName", subjectName]]) {
+      if (value) {
+        values.push(value);
+        filters.push(`"${column}" = $${values.length}`);
+      }
+    }
+    if (search) {
+      values.push(`%${search}%`);
+      filters.push(`("studentName" ILIKE $${values.length} OR "phone" ILIKE $${values.length} OR COALESCE("email", '') ILIKE $${values.length})`);
+    }
+    const where = filters.length ? filters.join(" AND ") : "TRUE";
+    const countResult = await query(`SELECT count(*)::integer AS total FROM "enquiries" WHERE ${where}`, values);
+    values.push(limit, (page - 1) * limit);
+    const rows = await query(
+      `SELECT * FROM "enquiries" WHERE ${where} ORDER BY "createdAt" DESC LIMIT $${values.length - 1} OFFSET $${values.length}`,
+      values,
+    );
+    const enquiryIds = rows.rows.map((item) => item._id);
+    const followUps = enquiryIds.length
+      ? await query(`SELECT "_id", "enquiry", "note", "followUpAt", "createdAt" FROM "follow_up_records" WHERE "enquiry" = ANY($1::uuid[]) ORDER BY "createdAt" DESC`, [enquiryIds])
+      : { rows: [] };
+    const notesByEnquiry = new Map();
+    for (const note of followUps.rows) {
+      const key = String(note.enquiry);
+      if (!notesByEnquiry.has(key)) notesByEnquiry.set(key, []);
+      notesByEnquiry.get(key).push(note);
+    }
+    const enquiries = rows.rows.map((item) => ({ ...item, notes: notesByEnquiry.get(String(item._id)) || [] }));
+    return response.json({ enquiries, pagination: { page, limit, total: countResult.rows[0].total, pages: Math.ceil(countResult.rows[0].total / limit) } });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.get("/api/admin/enquiries/export.csv", requireAuth({ roles: ["admin", "superadmin"] }), async (_request, response, next) => {
+  try {
+    const result = await query(`SELECT "leadId", "studentName", "phone", "email", "className", "subjectName", "status", "message", "createdAt" FROM "enquiries" ORDER BY "createdAt" DESC LIMIT 10000`);
+    const csv = [
+      ["Lead ID", "Student", "Phone", "Email", "Class", "Subject", "Status", "Message", "Received"],
+      ...result.rows.map((item) => [item.leadId, item.studentName, item.phone, item.email, item.className, item.subjectName, item.status, item.message, item.createdAt]),
+    ].map((row) => row.map(csvValue).join(",")).join("\r\n");
+    response.set("Content-Type", "text/csv; charset=utf-8");
+    response.set("Content-Disposition", 'attachment; filename="theorika-enquiries.csv"');
+    return response.send(`\uFEFF${csv}`);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.patch("/api/admin/enquiries/:enquiryId", requireAuth({ roles: ["admin", "superadmin"] }), async (request, response, next) => {
+  try {
+    const parsed = z.object({ status: z.enum(["New Enquiry", "Contacted", "Demo Done", "Enrolled", "Not Interested", "Follow-up Required"]) }).strict().safeParse(request.body);
+    if (!parsed.success) return validationError(response, parsed.error);
+    const enquiry = await Enquiry.findById(request.params.enquiryId);
+    if (!enquiry) return response.status(404).json({ error: "Enquiry not found." });
+    const previousStatus = enquiry.status;
+    enquiry.status = parsed.data.status;
+    await enquiry.save();
+    await writeAudit(request.auth.user._id, "enquiry.status_changed", "Enquiry", enquiry._id, { previousStatus, status: enquiry.status });
+    return response.json({ enquiry });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.post("/api/admin/enquiries/:enquiryId/notes", requireAuth({ roles: ["admin", "superadmin"] }), async (request, response, next) => {
+  try {
+    const parsed = z.object({ note: z.string().trim().min(1).max(4000), followUpAt: z.string().datetime().optional() }).strict().safeParse(request.body);
+    if (!parsed.success) return validationError(response, parsed.error);
+    const enquiry = await Enquiry.findById(request.params.enquiryId).select("_id");
+    if (!enquiry) return response.status(404).json({ error: "Enquiry not found." });
+    const followUp = await FollowUpRecord.create({
+      enquiry: enquiry._id,
+      createdBy: request.auth.user._id,
+      note: parsed.data.note,
+      ...(parsed.data.followUpAt ? { followUpAt: new Date(parsed.data.followUpAt) } : {}),
+    });
+    await writeAudit(request.auth.user._id, "enquiry.note_added", "Enquiry", enquiry._id, { noteId: followUp._id });
+    return response.status(201).json({ followUp });
   } catch (error) {
     return next(error);
   }
@@ -1051,6 +1216,12 @@ function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function csvValue(value) {
+  let text = value === null || value === undefined ? "" : String(value);
+  if (/^[\s]*[=+\-@]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
 async function writeAudit(actor, action, entityType, entityId, details) {
   await ActivityLog.create({ actor, action, entityType, entityId: String(entityId), details });
 }
@@ -1069,7 +1240,7 @@ const registrationSchema = z.object({
 
 const accessUpdateSchema = z.object({
   status: z.enum(["active", "rejected", "suspended", "blocked", "deleted"]).optional(),
-  role: z.enum(["user", "admin"]).optional(),
+  role: z.enum(["user", "admin", "editor"]).optional(),
   preset: z.enum(["learner", "instructor", "custom"]).optional(),
   permissions: z.object(Object.fromEntries(permissionNames.map((name) => [name, z.boolean().optional()]))).strict().optional(),
   bio: z.string().trim().max(2000).optional(),

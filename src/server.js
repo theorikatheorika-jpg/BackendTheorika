@@ -6,6 +6,7 @@ const express = require("express");
 const helmet = require("helmet");
 const multer = require("multer");
 const cloudinary = require("cloudinary").v2;
+const nodemailer = require("nodemailer");
 const { z } = require("zod");
 const { connectDatabase, isDatabaseConnected, query } = require("./database");
 const {
@@ -16,6 +17,7 @@ const {
   getNextSequence,
 } = require("./models");
 const { router: dashboardRoutes } = require("./dashboard-routes");
+const { router: cmsRoutes } = require("./cms-routes");
 
 const PORT = Number(process.env.PORT || 3001);
 const supabaseConfigured = Boolean(process.env.SUPABASE_DB_URL);
@@ -120,6 +122,7 @@ const facultyApplicationUpload = multer({
     return callback(null, true);
   },
 });
+const enquiryMailer = createMailTransport();
 
 const app = express();
 app.set("trust proxy", parseTrustProxyHops());
@@ -136,6 +139,7 @@ app.use(cors({
   maxAge: 86400,
 }));
 app.use(express.json({ limit: "16kb", strict: true }));
+app.use(cmsRoutes);
 app.use(dashboardRoutes);
 
 app.get("/health", (_request, response) => {
@@ -235,6 +239,7 @@ app.post("/api/enquiries", async (request, response, next) => {
 
     try {
       await document.save();
+      await notifyAdminAboutEnquiry(document);
       return response.status(201).json({ success: true, leadId: document.leadId });
     } catch (error) {
       if (error?.code !== 11000) throw error;
@@ -466,6 +471,7 @@ async function start() {
   if (supabaseConfigured) {
     await connectDatabase();
     await ensureFacultyApplicationsSchema();
+    await ensureCmsSchema();
     console.log("Supabase database connected.");
   }
 
@@ -543,12 +549,83 @@ async function ensureFacultyApplicationsSchema() {
   await query(`CREATE INDEX IF NOT EXISTS "faculty_applications_created" ON "faculty_applications" ("createdAt" DESC)`);
 }
 
+async function ensureCmsSchema() {
+  await query(`
+    DO $migration$
+    BEGIN
+      ALTER TABLE "users" DROP CONSTRAINT IF EXISTS "users_role_check";
+      ALTER TABLE "users"
+        ADD CONSTRAINT "users_role_check"
+        CHECK ("role" IN ('superadmin', 'admin', 'editor', 'user'));
+    END;
+    $migration$
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS "site_content" (
+      "_id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      "collection" varchar(60) NOT NULL,
+      "slug" varchar(160) NOT NULL,
+      "title" varchar(200) NOT NULL,
+      "content" jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof("content") = 'object'),
+      "displayOrder" integer NOT NULL DEFAULT 0 CHECK ("displayOrder" BETWEEN 0 AND 10000),
+      "isVisible" boolean NOT NULL DEFAULT true,
+      "status" text NOT NULL DEFAULT 'Draft' CHECK ("status" IN ('Draft', 'Published')),
+      "createdBy" uuid REFERENCES "users"("_id") ON DELETE SET NULL,
+      "createdAt" timestamptz NOT NULL DEFAULT now(),
+      "updatedAt" timestamptz NOT NULL DEFAULT now(),
+      UNIQUE ("collection", "slug")
+    )
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS "site_content_public_order" ON "site_content" ("collection", "status", "isVisible", "displayOrder")`);
+  await query(`ALTER TABLE "site_content" ENABLE ROW LEVEL SECURITY`);
+}
+
 function parseTrustProxyHops() {
   const value = process.env.TRUST_PROXY_HOPS || "0";
   const hops = Number(value);
   if (!Number.isInteger(hops) || hops < 0) {
     console.error("TRUST_PROXY_HOPS must be a non-negative integer.");
     process.exit(1);
+  }
+
+  function createMailTransport() {
+    const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, EMAIL_FROM } = process.env;
+    if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASSWORD || !EMAIL_FROM) return null;
+    return nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: Number(SMTP_PORT),
+      secure: Number(SMTP_PORT) === 465,
+      auth: { user: SMTP_USER, pass: SMTP_PASSWORD },
+    });
+  }
+
+  async function notifyAdminAboutEnquiry(enquiry) {
+    if (!enquiryMailer) return;
+    try {
+      const result = await query(
+        `SELECT "content"->>'email' AS email FROM "site_content" WHERE "collection" = 'site-settings' AND "status" = 'Published' AND "isVisible" = true ORDER BY "displayOrder" LIMIT 1`,
+      );
+      const recipient = result.rows[0]?.email;
+      if (!recipient) return;
+      await enquiryMailer.sendMail({
+        from: process.env.EMAIL_FROM,
+        to: recipient,
+        subject: `New website enquiry ${enquiry.leadId}`,
+        text: [
+          `Student: ${enquiry.studentName}`,
+          `Class: ${enquiry.className}`,
+          `Subject: ${enquiry.subjectName || "Not specified"}`,
+          `Phone: ${enquiry.phone}`,
+          `Email: ${enquiry.email || "Not provided"}`,
+          `Message: ${enquiry.message || "No message"}`,
+        ].join("\n"),
+      });
+    } catch (error) {
+      console.error("New enquiry was saved, but its admin email notification failed.", {
+        name: error?.name || "MailError",
+        code: error?.code || "unavailable",
+      });
+    }
   }
   return hops;
 }
