@@ -587,45 +587,45 @@ function parseTrustProxyHops() {
     console.error("TRUST_PROXY_HOPS must be a non-negative integer.");
     process.exit(1);
   }
+  return hops;
+}
 
-  function createMailTransport() {
-    const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, EMAIL_FROM } = process.env;
-    if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASSWORD || !EMAIL_FROM) return null;
-    return nodemailer.createTransport({
-      host: SMTP_HOST,
-      port: Number(SMTP_PORT),
-      secure: Number(SMTP_PORT) === 465,
-      auth: { user: SMTP_USER, pass: SMTP_PASSWORD },
+function createMailTransport() {
+  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, EMAIL_FROM } = process.env;
+  if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASSWORD || !EMAIL_FROM) return null;
+  return nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: Number(SMTP_PORT),
+    secure: Number(SMTP_PORT) === 465,
+    auth: { user: SMTP_USER, pass: SMTP_PASSWORD },
+  });
+}
+
+async function notifyAdminAboutEnquiry(enquiry) {
+  if (!enquiryMailer) return;
+  try {
+    const result = await query(
+      `SELECT "content"->>'email' AS email FROM "site_content" WHERE "collection" = 'site-settings' AND "status" = 'Published' AND "isVisible" = true ORDER BY "displayOrder" LIMIT 1`,
+    );
+    const recipient = result.rows[0]?.email;
+    if (!recipient) return;
+    await enquiryMailer.sendMail({
+      from: process.env.EMAIL_FROM,
+      to: recipient,
+      subject: `New website enquiry ${enquiry.leadId}`,
+      text: [
+        `Student: ${enquiry.studentName}`,
+        `Class: ${enquiry.className}`,
+        `Subject: ${enquiry.subjectName || "Not specified"}`,
+        `Phone: ${enquiry.phone}`,
+        `Email: ${enquiry.email || "Not provided"}`,
+        `Message: ${enquiry.message || "No message"}`,
+      ].join("\n"),
+    });
+  } catch (error) {
+    console.error("New enquiry was saved, but its admin email notification failed.", {
+      name: error?.name || "MailError",
+      code: error?.code || "unavailable",
     });
   }
-
-  async function notifyAdminAboutEnquiry(enquiry) {
-    if (!enquiryMailer) return;
-    try {
-      const result = await query(
-        `SELECT "content"->>'email' AS email FROM "site_content" WHERE "collection" = 'site-settings' AND "status" = 'Published' AND "isVisible" = true ORDER BY "displayOrder" LIMIT 1`,
-      );
-      const recipient = result.rows[0]?.email;
-      if (!recipient) return;
-      await enquiryMailer.sendMail({
-        from: process.env.EMAIL_FROM,
-        to: recipient,
-        subject: `New website enquiry ${enquiry.leadId}`,
-        text: [
-          `Student: ${enquiry.studentName}`,
-          `Class: ${enquiry.className}`,
-          `Subject: ${enquiry.subjectName || "Not specified"}`,
-          `Phone: ${enquiry.phone}`,
-          `Email: ${enquiry.email || "Not provided"}`,
-          `Message: ${enquiry.message || "No message"}`,
-        ].join("\n"),
-      });
-    } catch (error) {
-      console.error("New enquiry was saved, but its admin email notification failed.", {
-        name: error?.name || "MailError",
-        code: error?.code || "unavailable",
-      });
-    }
-  }
-  return hops;
 }
