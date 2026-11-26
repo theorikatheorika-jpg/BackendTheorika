@@ -66,20 +66,26 @@ function tokenFromRequest(request) {
   return null;
 }
 
+// The site and the API live on different domains in production, so the session
+// cookie must be SameSite=None; Secure whenever the API is reached over HTTPS.
+// Hosts such as Render terminate TLS and report it in X-Forwarded-Proto.
+function cookieAttributes(response) {
+  const request = response.req;
+  const forwardedProto = String(request?.headers?.["x-forwarded-proto"] || "").split(",")[0].trim();
+  const https = process.env.NODE_ENV === "production" || request?.secure || forwardedProto === "https";
+  return https ? "SameSite=None; Secure" : "SameSite=Lax";
+}
+
 function setSessionCookie(response, token, expiresAt) {
   const maxAge = Math.max(0, Math.floor((expiresAt.getTime() - Date.now()) / 1000));
-  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
-  const sameSite = process.env.NODE_ENV === "production" ? "None" : "Lax";
   response.setHeader(
     "Set-Cookie",
-    `${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; SameSite=${sameSite}; Path=/; Max-Age=${maxAge}${secure}`,
+    `${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; ${cookieAttributes(response)}; Path=/; Max-Age=${maxAge}`,
   );
 }
 
 function clearSessionCookie(response) {
-  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
-  const sameSite = process.env.NODE_ENV === "production" ? "None" : "Lax";
-  response.setHeader("Set-Cookie", `${COOKIE_NAME}=; HttpOnly; SameSite=${sameSite}; Path=/; Max-Age=0${secure}`);
+  response.setHeader("Set-Cookie", `${COOKIE_NAME}=; HttpOnly; ${cookieAttributes(response)}; Path=/; Max-Age=0`);
 }
 
 async function createSession(user, request, response) {
