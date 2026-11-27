@@ -144,7 +144,7 @@ router.get("/api/public/notices", async (_request, response, next) => {
         { $or: [{ publishAt: { $exists: false } }, { publishAt: { $lte: now } }] },
         { $or: [{ expiresAt: { $exists: false } }, { expiresAt: { $gt: now } }] },
       ],
-    }).select("noticeId title content category publishAt").sort({ publishAt: -1 }).limit(10).lean();
+    }).select("noticeId title content category publishAt createdAt").sort({ createdAt: -1 }).limit(20).lean();
     return response.json({ notices });
   } catch (error) {
     return next(error);
