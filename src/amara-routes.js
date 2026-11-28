@@ -5,7 +5,7 @@ const { z } = require("zod");
 const { isDatabaseConnected, query } = require("./database");
 const { AMARA_SYSTEM_PROMPT } = require("./amaraKnowledge");
 
-// AMARA: the Theorika website's chat assistant, answered by Claude.
+// Amora: the Theorika website's chat assistant, answered by Claude.
 const router = express.Router();
 const MODEL = "claude-opus-5-5";
 const amaraConfigured = Boolean(process.env.ANTHROPIC_API_KEY);
@@ -16,7 +16,7 @@ const allowedOrigins = new Set(
 );
 
 if (!amaraConfigured) {
-  console.warn("AMARA chat is unavailable until ANTHROPIC_API_KEY is configured in the backend environment.");
+  console.warn("Amora chat is unavailable until ANTHROPIC_API_KEY is configured in the backend environment.");
 }
 
 const chatSchema = z.object({
@@ -31,7 +31,7 @@ const chatSchema = z.object({
   { message: "Messages must alternate, starting and ending with the visitor." },
 );
 
-// AMARA's rules, facts and FAQ live in amaraKnowledge.js.
+// Amora's rules, facts and FAQ live in amaraKnowledge.js.
 const BASE_PROMPT = AMARA_SYSTEM_PROMPT;
 
 let liveFacts = { text: "", loadedAt: 0 };
@@ -61,7 +61,7 @@ async function loadLiveFacts() {
       .slice(0, 20_000);
     liveFacts = { text, loadedAt: Date.now() };
   } catch (error) {
-    console.error("AMARA could not load site content.", { code: error?.code || "unavailable" });
+    console.error("Amora could not load site content.", { code: error?.code || "unavailable" });
     liveFacts = { text: liveFacts.text, loadedAt: Date.now() };
   }
   return liveFacts.text;
@@ -86,10 +86,10 @@ function overLimit(ip) {
 
 router.post("/api/amara/chat", async (request, response) => {
   if (!amaraConfigured) {
-    return response.status(503).json({ error: "AMARA is resting right now. Please message us on WhatsApp or use the enquiry form." });
+    return response.status(503).json({ error: "Amora is resting right now. Please message us on WhatsApp or use the enquiry form." });
   }
   if (!allowedOrigins.has(request.get("Origin"))) {
-    return response.status(403).json({ error: "This website is not allowed to use AMARA." });
+    return response.status(403).json({ error: "This website is not allowed to use Amora." });
   }
   if (overLimit(request.ip)) {
     return response.status(429).json({ error: "You've sent a lot of messages. Please wait a few minutes and try again." });
@@ -125,17 +125,17 @@ router.post("/api/amara/chat", async (request, response) => {
     return response.json({ reply: text || "Sorry, I couldn't think of an answer. Could you rephrase that?" });
   } catch (error) {
     if (error instanceof Anthropic.RateLimitError) {
-      return response.status(429).json({ error: "AMARA is busy right now. Please try again in a minute." });
+      return response.status(429).json({ error: "Amora is busy right now. Please try again in a minute." });
     }
     if (error instanceof Anthropic.AuthenticationError || error instanceof Anthropic.PermissionDeniedError) {
-      console.error("AMARA: the Anthropic API key was rejected.");
-      return response.status(503).json({ error: "AMARA is unavailable right now. Please message us on WhatsApp." });
+      console.error("Amora: the Anthropic API key was rejected.");
+      return response.status(503).json({ error: "Amora is unavailable right now. Please message us on WhatsApp." });
     }
-    console.error("AMARA chat failed.", {
+    console.error("Amora chat failed.", {
       name: error?.name || "Error",
       status: error?.status || "unavailable",
     });
-    return response.status(502).json({ error: "AMARA couldn't reply just now. Please try again." });
+    return response.status(502).json({ error: "Amora couldn't reply just now. Please try again." });
   }
 });
 
