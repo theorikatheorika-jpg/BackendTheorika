@@ -18,6 +18,7 @@ const {
 } = require("./models");
 const { router: dashboardRoutes } = require("./dashboard-routes");
 const { router: cmsRoutes } = require("./cms-routes");
+const { router: amaraRoutes } = require("./amara-routes");
 
 const PORT = Number(process.env.PORT || 3001);
 const supabaseConfigured = Boolean(process.env.SUPABASE_DB_URL);
@@ -139,6 +140,7 @@ app.use(cors({
   maxAge: 86400,
 }));
 app.use(express.json({ limit: "16kb", strict: true }));
+app.use(amaraRoutes);
 app.use(cmsRoutes);
 app.use(dashboardRoutes);
 
